@@ -1,0 +1,5 @@
+sketch/secrets.h
+
+__pycache__/
+*.pyc
+.env
