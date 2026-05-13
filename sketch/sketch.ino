@@ -5,6 +5,18 @@
 #include <ArduinoJson.h>
 #include <DHT.h>
 
+// OLED LIBRARY
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Wire.h>
+
+#define LEBAR   128
+#define TINGGI  32
+#define OLED_RESET -1 // Wajib untuk pin reset OLED
+
+// INI SOLUSI ERROR 1: Mendeklarasikan objek oled
+Adafruit_SSD1306 oled(LEBAR, TINGGI, &Wire, OLED_RESET);
+
 #define PIN_DHT           5
 #define TYPE_DHT          DHT11
 #define PIN_LDR_AO        34
@@ -25,14 +37,29 @@ float totalCahaya     = 0;
 
 unsigned long lastTick = 0;
 
-// ── WiFi Scan ────────────────────────────────────────────────────────────────
+// MENAMPILKAN PADA OLED
+void tampilkanOled(String baris1, String baris2, String baris3, String baris4) {
+  oled.clearDisplay();
+  oled.setTextSize(1);
+  oled.setTextColor(WHITE);
+  oled.setCursor(0, 0);   oled.println(baris1);
+  oled.setCursor(0, 8);   oled.println(baris2);
+  oled.setCursor(0, 16);  oled.println(baris3);
+  oled.setCursor(0, 24);  oled.println(baris4);
+  oled.display();
+}
 
+// ── WiFi Scan ────────────────────────────────────────────────────────────────
 void scanWiFi() {
   Serial.println("[SCAN] Mencari jaringan...");
+  tampilkanOled("WiFi Scan", "Mencari Jaringan...", "", "");
+  
   int n = WiFi.scanNetworks();
 
   if (n == 0) {
     Serial.println("[SCAN] Tidak ada jaringan ditemukan!");
+    tampilkanOled("WiFi Scan", "Tidak ada jaringan!", "Cek jangkauan", "");
+    delay(2000);
     return;
   }
 
@@ -51,16 +78,17 @@ void scanWiFi() {
 
   if (!ketemu) {
     Serial.println("[SCAN] ✗ SSID '" + String(WIFI_SSID) + "' TIDAK DITEMUKAN!");
-    Serial.println("[SCAN]   → Cek: hotspot aktif? Band 2.4 GHz? SSID typo?");
+    tampilkanOled("WiFi Scan", "Target SSID:", String(WIFI_SSID), "TDK DITEMUKAN!");
+    delay(3000);
   }
 }
 
 // ── WiFi Connect ─────────────────────────────────────────────────────────────
-
 bool hubungkanWiFi() {
   for (int percobaan = 1; percobaan <= WIFI_MAX_RETRY; percobaan++) {
-    Serial.printf("[WiFi] Percobaan %d/%d — SSID: %s\n",
-                  percobaan, WIFI_MAX_RETRY, WIFI_SSID);
+    Serial.printf("[WiFi] Percobaan %d/%d — SSID: %s\n", percobaan, WIFI_MAX_RETRY, WIFI_SSID);
+                  
+    tampilkanOled("Koneksi WiFi", "SSID: " + String(WIFI_SSID), "Percobaan: " + String(percobaan) + "/" + String(WIFI_MAX_RETRY), "Menghubungkan...");
 
     WiFi.disconnect(true);
     delay(100);
@@ -77,32 +105,31 @@ bool hubungkanWiFi() {
 
     if (WiFi.status() == WL_CONNECTED) {
       Serial.println("[WiFi] ✓ Terhubung! IP: " + WiFi.localIP().toString());
-      Serial.println("[WiFi] RSSI: " + String(WiFi.RSSI()) + " dBm");
+      tampilkanOled("WiFi Terhubung!", "IP:", WiFi.localIP().toString(), "RSSI: " + String(WiFi.RSSI()) + " dBm");
+      delay(2000);
       return true;
     }
 
-    Serial.printf("[WiFi] ✗ Gagal. Status: %d", WiFi.status());
-    switch (WiFi.status()) {
-      case WL_NO_SSID_AVAIL:  Serial.println(" (SSID tidak ditemukan — cek nama & 2.4 GHz)"); break;
-      case WL_CONNECT_FAILED: Serial.println(" (Password salah)");                             break;
-      case WL_DISCONNECTED:   Serial.println(" (Disconnected — cek jangkauan / daya)");        break;
-      default:                Serial.println();
-    }
+    tampilkanOled("WiFi Gagal!", "Status: " + String(WiFi.status()), "Mencoba lagi...", "");
     delay(2000);
   }
+  
+  tampilkanOled("WiFi Gagal", "Cek Hotspot/Router", "Modul Standby...", "");
   return false;
 }
 
 // ── HTTP ke Supabase ─────────────────────────────────────────────────────────
-
 void kirimKeSupabase(float suhu, float kelembapan, float cahaya, bool gelap) {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[HTTP] WiFi putus, mencoba reconnect...");
+    tampilkanOled("WiFi Putus!", "Mencoba reconnect...", "", "");
     if (!hubungkanWiFi()) {
-      Serial.println("[HTTP] Reconnect gagal, data dibuang.");
+      tampilkanOled("Kirim Gagal", "WiFi tidak ada", "Data dibuang", "");
+      delay(2000);
       return;
     }
   }
+
+  tampilkanOled("Supabase...", "Mengirim Data AVG", "Suhu: " + String(suhu, 1) + "C", "Mohon tunggu...");
 
   JsonDocument doc;
   doc["suhu"]       = round(suhu * 10.0) / 10.0;
@@ -113,13 +140,8 @@ void kirimKeSupabase(float suhu, float kelembapan, float cahaya, bool gelap) {
   String payload;
   serializeJson(doc, payload);
 
-  // ── DEBUG: print URL sebelum kirim ──
-  // Serial.println("[HTTP] URL    : " + String(SUPABASE_URL));
-  Serial.println("[HTTP] Payload: " + payload);
-
   HTTPClient http;
   String url = String(SUPABASE_URL) + "/rest/v1/" + SUPABASE_TABLE;
-  Serial.println("[HTTP] URL    : " + url);
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("apikey", SUPABASE_KEY);
@@ -130,17 +152,16 @@ void kirimKeSupabase(float suhu, float kelembapan, float cahaya, bool gelap) {
   int code = http.POST(payload);
 
   if (code == 201) {
-    Serial.println("[HTTP] ✓ Berhasil dikirim (201 Created)");
+    tampilkanOled("Sukses Kirim!", "Kode HTTP: 201", "Database Updated", "");
   } else {
-    Serial.printf("[HTTP] ✗ Gagal. Code: %d\n", code);
-    if (code > 0) Serial.println("[HTTP] Response: " + http.getString());
+    tampilkanOled("Gagal Kirim!", "Kode HTTP: " + String(code), "Cek Auth/URL", "");
   }
 
   http.end();
+  delay(2500); 
 }
 
 // ── Baca & Akumulasi ─────────────────────────────────────────────────────────
-
 void bacaDanAkumulasi() {
   float suhu       = dht.readTemperature();
   float kelembapan = dht.readHumidity();
@@ -148,14 +169,24 @@ void bacaDanAkumulasi() {
 
   if (isnan(suhu) || isnan(kelembapan)) {
     Serial.println("[DHT] Gagal baca sensor!");
+    tampilkanOled("ERROR SENSOR", "Gagal baca DHT11", "Cek Kabel PIN " + String(PIN_DHT), "");
     return;
   }
 
+  String kondisiCahaya = (cahaya > THRESHOLD_GELAP) ? "GELAP" : "TERANG";
+
   if (hitungan % 10 == 0) {
     Serial.printf("[SENSOR] Suhu: %.1f°C | Kelembapan: %.1f%% | Cahaya: %d | %s\n",
-      suhu, kelembapan, cahaya,
-      (cahaya > THRESHOLD_GELAP) ? "GELAP" : "TERANG");
+      suhu, kelembapan, cahaya, kondisiCahaya.c_str());
   }
+
+  int sisaWaktu = TICKS_PER_SEND - hitungan;
+  tampilkanOled(
+    "S: " + String(suhu, 1) + "C | H: " + String(kelembapan, 1) + "%",
+    "LDR: " + String(cahaya) + " (" + kondisiCahaya + ")",
+    "Akumulasi: " + String(hitungan) + "/" + String(TICKS_PER_SEND),
+    "Kirim dlm: " + String(sisaWaktu) + " dtk"
+  );
 
   totalSuhu       += suhu;
   totalKelembapan += kelembapan;
@@ -168,11 +199,11 @@ void bacaDanAkumulasi() {
     float avgCahaya     = totalCahaya     / TICKS_PER_SEND;
     bool  avgGelap      = (avgCahaya > THRESHOLD_GELAP);
 
-    Serial.println("\n[AVG] ===== Rata-rata 1 menit =====");
-    Serial.printf("[AVG] Suhu: %.2f°C | Kelembapan: %.2f%% | Cahaya: %.0f | %s\n",
-      avgSuhu, avgKelembapan, avgCahaya, avgGelap ? "GELAP" : "TERANG");
-
     kirimKeSupabase(avgSuhu, avgKelembapan, avgCahaya, avgGelap);
+    
+    // INI SOLUSI ERROR 2: Menambahkan parameter ke dalam tampilkanOled
+    tampilkanOled("Data Terkirim!", "Suhu AVG: " + String(avgSuhu, 1), "LDR AVG: " + String(avgCahaya, 0), "Status: " + String(avgGelap ? "GELAP" : "TERANG"));
+    delay(2000);
 
     hitungan        = 0;
     totalSuhu       = 0;
@@ -182,11 +213,20 @@ void bacaDanAkumulasi() {
 }
 
 // ── Setup ────────────────────────────────────────────────────────────────────
-
 void setup() {
   Serial.begin(115200);
   delay(500);
   dht.begin();
+
+  Wire.begin(21, 22);
+  
+  if (!oled.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED tidak ditemukan!");
+    while (true); 
+  }
+  
+  tampilkanOled("AtmoMind System", "Booting...", "Polines", "");
+  delay(2000);
 
   Serial.println("\n[BOOT] Memulai...");
   scanWiFi();
@@ -194,7 +234,6 @@ void setup() {
 }
 
 // ── Loop ─────────────────────────────────────────────────────────────────────
-
 void loop() {
   unsigned long now = millis();
   if (now - lastTick >= TICK_INTERVAL_MS) {
