@@ -235,6 +235,10 @@ void setup() {
 
 // ── Loop ─────────────────────────────────────────────────────────────────────
 void loop() {
+  if (!WiFi.status() == WL_CONNECTED) {
+    hubungkanWiFi();
+  }
+
   unsigned long now = millis();
   if (now - lastTick >= TICK_INTERVAL_MS) {
     lastTick = now;
