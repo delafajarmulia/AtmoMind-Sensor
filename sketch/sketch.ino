@@ -34,7 +34,7 @@
 // ==========================================
 #define TICK_INTERVAL_MS  2000UL 
 #define TICKS_PER_SEND    150    
-#define DURASI_MODE2_MS   10000UL  // [FIX] Auto-kembali ke Mode 1 setelah 10 detik
+#define DURASI_MODE2_MS   10000UL  // Auto-kembali ke Mode 1 setelah 10 detik
 
 #ifndef SUPABASE_TABLE
 #define SUPABASE_TABLE "sensor_data"
@@ -193,58 +193,40 @@ void kirimKeSupabase(float suhu, float kelembapan, float cahaya, bool gelap) {
 // SETUP UTAMA
 // ==========================================
 void setup() {
-
   Serial.begin(115200);
   
   // 1. Nyalakan Layar Dulu
   tft.begin();
   tft.setRotation(1); 
   tft.fillScreen(ILI9341_BLACK);
-  
   delay(1000);
   
   // 2. Nyalakan Sensor
   ts.begin();
   dht.begin(); 
-  
   delay(1000);
   
   // 3. Terakhir, nyalakan WiFi
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-
 }
 
 // ==========================================
 // LOOP UTAMA
 // ==========================================
 void loop() {
-<<<<<<< HEAD
-  
+
   // --- 1. DETEKSI SENTUHAN ---
   static bool memoriSentuhan = false;     
   static unsigned long waktuSentuhTerakhir = 0;
-  static unsigned long waktuMasukMode2 = 0; // [FIX] Timer auto-kembali Mode 2 → Mode 1
+  static unsigned long waktuMasukMode2 = 0;
 
-  // [FIX] Validasi sentuhan: cek koordinat & tekanan untuk mencegah ghost touch dari noise SPI.
-  // ts.touched() saja tidak cukup karena traffic SPI ke TFT bisa terbaca sebagai sentuhan palsu.
-  // Sentuhan asli selalu menghasilkan koordinat dalam rentang wajar (100–3900) dan tekanan > 300.
   bool sedangDisentuh = false;
   if (ts.touched()) {
     TS_Point p = ts.getPoint();
     if (p.z > 300 && p.x > 100 && p.x < 3900 && p.y > 100 && p.y < 3900) {
       sedangDisentuh = true;
     }
-=======
-  if (!WiFi.status() == WL_CONNECTED) {
-    hubungkanWiFi();
-  }
-
-  unsigned long now = millis();
-  if (now - lastTick >= TICK_INTERVAL_MS) {
-    lastTick = now;
-    bacaDanAkumulasi();
->>>>>>> 5c8cb05f88e1edba76fb66347cf1367aa1c83ee4
   }
 
   if (sedangDisentuh && !memoriSentuhan && (millis() - waktuSentuhTerakhir > 300)) {
@@ -253,12 +235,12 @@ void loop() {
     paksaUpdateAngka = true;
     waktuSentuhTerakhir = millis();
     if (!modeUtama) {
-      waktuMasukMode2 = millis(); // [FIX] Catat waktu saat pertama kali masuk Mode 2
+      waktuMasukMode2 = millis();
     }
   }
   memoriSentuhan = sedangDisentuh;
 
-  // [FIX] Auto kembali ke Mode 1 setelah 10 detik berada di Mode 2
+  // Auto kembali ke Mode 1 setelah 10 detik berada di Mode 2
   if (!modeUtama && (millis() - waktuMasukMode2 >= DURASI_MODE2_MS)) {
     modeUtama = true;
     modeBerubah = true;
@@ -378,7 +360,7 @@ void loop() {
 
     // 3B. BACA SENSOR
     if (saatnyaTick) {
-      lastTick = millis(); // Reset interval di sini
+      lastTick = millis();
 
       float bacaSuhu = dht.readTemperature(); 
       float bacaKelem = dht.readHumidity();
@@ -411,7 +393,7 @@ void loop() {
       }
     }
 
-    paksaUpdateAngka = false; // Matikan toggle paksa agar tidak bentrok
+    paksaUpdateAngka = false;
 
     // 3C. UPDATE STATUS LDR INLINE
     String kondisiCahaya = (cahaya > THRESHOLD_GELAP) ? "GELAP" : "TERANG";
