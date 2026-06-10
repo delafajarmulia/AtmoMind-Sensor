@@ -1,135 +1,167 @@
-#include "secrets.h"
+#include "secrets.h" 
 
-#include <WiFi.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+#include <XPT2046_Touchscreen.h>
+#include <DHT.h>
+#include <WiFi.h> 
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <DHT.h>
 
-// OLED LIBRARY
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
-#include <Wire.h>
 
-#define LEBAR   128
-#define TINGGI  32
-#define OLED_RESET -1 // Wajib untuk pin reset OLED
+// ==========================================
+// KONFIGURASI PIN TERBAIK (TFT KANAN, SENSOR KIRI)
+// ==========================================
 
-// INI SOLUSI ERROR 1: Mendeklarasikan objek oled
-Adafruit_SSD1306 oled(LEBAR, TINGGI, &Wire, OLED_RESET);
+// --- PIN TFT & TOUCH (Blok Kanan / Deretan 3V3) ---
+#define TFT_CS    5
+#define TFT_DC    21
+#define TFT_RST   22
+#define TOUCH_CS  15
+// Catatan: MISO=19, MOSI=23, SCK=18 otomatis di deretan 3V3
 
-#define PIN_DHT           5
-#define TYPE_DHT          DHT11
-#define PIN_LDR_AO        34
+// --- PIN SENSOR DHT11 (Blok Kiri / Deretan VIN) ---
+#define DHTPIN    27     
+#define DHTTYPE   DHT11  
+
+// --- PIN SENSOR LDR (Blok Kiri / Deretan VIN) ---
+#define PIN_LDR_AO       34  // Tetap di D34 (Analog)
 #define THRESHOLD_GELAP   2400
-#define TICK_INTERVAL_MS  1000UL
-#define TICKS_PER_SEND    300
-#define WIFI_MAX_RETRY    3
-#define WIFI_TIMEOUT_MS   15000UL
 
+// ==========================================
+// KONFIGURASI SISTEM
+// ==========================================
+#define TICK_INTERVAL_MS  2000UL 
+#define TICKS_PER_SEND    150    
+#define DURASI_MODE2_MS   10000UL  // [FIX] Auto-kembali ke Mode 1 setelah 10 detik
+
+#ifndef SUPABASE_TABLE
 #define SUPABASE_TABLE "sensor_data"
+#endif
 
-DHT dht(PIN_DHT, TYPE_DHT);
+const char* ssid = "POCO M5";
+const char* password = "miko1234";
 
+Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
+XPT2046_Touchscreen ts(TOUCH_CS);
+DHT dht(DHTPIN, DHTTYPE);
+
+// --- VARIABEL KONTROL UI ---
+bool modeUtama = true;
+bool modeBerubah = true; 
+bool paksaUpdateAngka = true; 
+
+unsigned long lastTick = 0;
+float suhuLama = -999.0;
+float kelemLama = -999.0;
+int statusWifiLama = -1; 
+
+uint16_t warnaSuhu = tft.color565(244, 67, 54); 
+uint16_t warnaKelem = tft.color565(0, 150, 136);
+
+// --- VARIABEL AKUMULASI DATA ---
 int   hitungan        = 0;
 float totalSuhu       = 0;
 float totalKelembapan = 0;
 float totalCahaya     = 0;
 
-unsigned long lastTick = 0;
+// --- VARIABEL MEMORI STATUS (Agar tidak hilang saat ganti mode UI) ---
+String teksWifi       = "Menghubungkan WiFi...";
+uint16_t warnaTeksWifi= ILI9341_YELLOW;
+String teksDB         = "Menunggu Jaringan...";
+uint16_t warnaTeksDB  = ILI9341_ORANGE;
+String teksLDR        = "LDR: - | Sisa Waktu: -";
+uint16_t warnaTeksLDR = ILI9341_WHITE;
 
-// MENAMPILKAN PADA OLED
-void tampilkanOled(String baris1, String baris2, String baris3, String baris4) {
-  oled.clearDisplay();
-  oled.setTextSize(1);
-  oled.setTextColor(WHITE);
-  oled.setCursor(0, 0);   oled.println(baris1);
-  oled.setCursor(0, 8);   oled.println(baris2);
-  oled.setCursor(0, 16);  oled.println(baris3);
-  oled.setCursor(0, 24);  oled.println(baris4);
-  oled.display();
+
+// ==========================================
+// DATA BITMAP / HEX ARRAY 
+// ==========================================
+const unsigned char thermo_bmp[] PROGMEM = {
+  0x03, 0x80, 0x00, 0x00, 0x0f, 0xe0, 0x00, 0x00, 0x0c, 0x73, 0xff, 0xf8,
+  0x18, 0x37, 0xff, 0xfc, 0x18, 0x37, 0xff, 0xfc, 0x18, 0x30, 0x00, 0x00,
+  0x18, 0x30, 0x00, 0x00, 0x18, 0x33, 0xfc, 0x00, 0x18, 0x37, 0xfe, 0x00,
+  0x19, 0x37, 0xfe, 0x00, 0x19, 0xb1, 0xfc, 0x00, 0x19, 0xb0, 0x00, 0x00,
+  0x19, 0xb0, 0x00, 0x00, 0x19, 0xb7, 0xff, 0xf0, 0x19, 0xb7, 0xff, 0xf0,
+  0x19, 0xb3, 0xff, 0xe0, 0x19, 0xb0, 0x00, 0x00, 0x39, 0xb8, 0x00, 0x00,
+  0x71, 0x9c, 0x00, 0x00, 0x61, 0x8c, 0x00, 0x00, 0xe7, 0xce, 0x00, 0x00,
+  0xc7, 0xc6, 0x00, 0x00, 0xc7, 0xe6, 0x00, 0x00, 0xc7, 0xc6, 0x00, 0x00,
+  0xe7, 0xc6, 0x00, 0x00, 0x61, 0x0c, 0x00, 0x00, 0x70, 0x1c, 0x00, 0x00,
+  0x38, 0x38, 0x00, 0x00, 0x1f, 0xf0, 0x00, 0x00, 0x07, 0xe0, 0x00, 0x00
+};
+const unsigned char drop_bmp[] PROGMEM = {
+  0x00, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x7e, 0x00,
+  0x00, 0xff, 0x00, 0x01, 0xff, 0x80, 0x03, 0xff, 0xc0, 0x07, 0xff, 0xe0,
+  0x0f, 0xff, 0xf0, 0x1f, 0xff, 0xf8, 0x1f, 0xff, 0xf8, 0x3f, 0xff, 0xfc,
+  0x3f, 0x9f, 0xfc, 0x3f, 0x8f, 0xfc, 0x3f, 0xc7, 0xfc, 0x1f, 0xff, 0xf8,
+  0x1f, 0xff, 0xf8, 0x0f, 0xff, 0xf0, 0x07, 0xff, 0xe0, 0x03, 0xff, 0xc0,
+  0x00, 0xff, 0x00, 0x00, 0x3c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+const unsigned char image_Wifi_icon_bits[] PROGMEM = {
+  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+  0x00,0x7f,0xfe,0x00,0x01,0xff,0xff,0x80,0x07,0xff,0xff,0xe0,0x1f,0xff,0xff,0xf8,
+  0x3f,0xff,0xff,0xfc,0x7f,0xe0,0x07,0xfe,0xff,0x00,0x00,0xff,0xfe,0x00,0x00,0x7f,
+  0xf8,0x00,0x00,0x1f,0xf0,0x0f,0xf0,0x0f,0x00,0x3f,0xfc,0x00,0x00,0xff,0xff,0x00,
+  0x01,0xff,0xff,0x80,0x03,0xff,0xff,0x80,0x03,0xf8,0x1f,0xc0,0x01,0xf0,0x0f,0x80,
+  0x00,0xc0,0x03,0x00,0x00,0x00,0x00,0x00,0x00,0x03,0xc0,0x00,0x00,0x07,0xe0,0x00,
+  0x00,0x07,0xe0,0x00,0x00,0x07,0xe0,0x00,0x00,0x07,0xe0,0x00,0x00,0x03,0xc0,0x00,
+  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00
+};
+const unsigned char image_Files_icon_bits[] PROGMEM = {
+  0x00,0x00,0x00,0x00,0x1f,0xf8,0x00,0x00,0x3f,0xfe,0x00,0x00,0x7f,0xff,0x80,0x00,
+  0xfe,0x3f,0xff,0xf8,0xf8,0x0f,0xff,0xfe,0xf0,0x03,0xff,0xfe,0xe0,0x00,0x00,0x3f,
+  0xe0,0x00,0x00,0x0f,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+  0xe0,0x00,0x00,0x07,0xe0,0x00,0x00,0x07,0xe0,0x00,0x00,0x07,0xe0,0x00,0x00,0x07,
+  0xe0,0x00,0x00,0x07,0xe0,0x00,0x00,0x07,0xe0,0x00,0x00,0x07,0xe0,0x00,0x00,0x07,
+  0xe0,0x00,0x00,0x07,0xe0,0x00,0x00,0x07,0xe0,0x00,0x00,0x07,0xe0,0x00,0x00,0x07,
+  0xf0,0x00,0x00,0x0f,0xf8,0x00,0x00,0x1f,0xfe,0x00,0x00,0x7f,0x7f,0xff,0xff,0xfe,
+  0x3f,0xff,0xff,0xfc,0x1f,0xff,0xff,0xf8,0x00,0x00,0x00,0x00
+};
+
+// ==========================================
+// FUNGSI HELPER UNTUK UPDATE STATUS INLINE
+// ==========================================
+void updateStatusWifi(String pesan, uint16_t warna) {
+  teksWifi = pesan;
+  warnaTeksWifi = warna;
+  if (!modeUtama && !modeBerubah) {
+    tft.fillRect(55, 68, 260, 15, ILI9341_BLACK);
+    tft.setCursor(55, 68); tft.setTextColor(warnaTeksWifi); tft.setTextSize(1);
+    tft.print(teksWifi);
+  }
 }
 
-// ── WiFi Scan ────────────────────────────────────────────────────────────────
-void scanWiFi() {
-  Serial.println("[SCAN] Mencari jaringan...");
-  tampilkanOled("WiFi Scan", "Mencari Jaringan...", "", "");
-  
-  int n = WiFi.scanNetworks();
+void updateStatusDB(String pesan, uint16_t warna) {
+  teksDB = pesan;
+  warnaTeksDB = warna;
+  if (!modeUtama && !modeBerubah) {
+    tft.fillRect(55, 109, 260, 15, ILI9341_BLACK);
+    tft.setCursor(55, 109); tft.setTextColor(warnaTeksDB); tft.setTextSize(1);
+    tft.print(teksDB);
+  }
+}
 
-  if (n == 0) {
-    Serial.println("[SCAN] Tidak ada jaringan ditemukan!");
-    tampilkanOled("WiFi Scan", "Tidak ada jaringan!", "Cek jangkauan", "");
-    delay(2000);
+void updateStatusLDR(String pesan, uint16_t warna) {
+  teksLDR = pesan;
+  warnaTeksLDR = warna;
+  if (!modeUtama && !modeBerubah) {
+    tft.fillRect(15, 145, 300, 15, ILI9341_BLACK);
+    tft.setCursor(15, 145); tft.setTextColor(warnaTeksLDR); tft.setTextSize(1);
+    tft.print(teksLDR);
+  }
+}
+
+// ==========================================
+// FUNGSI HTTP KE SUPABASE
+// ==========================================
+void kirimKeSupabase(float suhu, float kelembapan, float cahaya, bool gelap) {
+  if (WiFi.status() != WL_CONNECTED) {
+    updateStatusDB("Gagal Kirim: WiFi Tidak Terhubung!", ILI9341_RED);
     return;
   }
 
-  bool ketemu = false;
-  for (int i = 0; i < n; i++) {
-    bool cocok = (WiFi.SSID(i) == String(WIFI_SSID));
-    Serial.printf("[SCAN] %s | %d dBm | CH%d | %s %s\n",
-      WiFi.SSID(i).c_str(),
-      WiFi.RSSI(i),
-      WiFi.channel(i),
-      (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Protected",
-      cocok ? "<-- TARGET" : ""
-    );
-    if (cocok) ketemu = true;
-  }
-
-  if (!ketemu) {
-    Serial.println("[SCAN] ✗ SSID '" + String(WIFI_SSID) + "' TIDAK DITEMUKAN!");
-    tampilkanOled("WiFi Scan", "Target SSID:", String(WIFI_SSID), "TDK DITEMUKAN!");
-    delay(3000);
-  }
-}
-
-// ── WiFi Connect ─────────────────────────────────────────────────────────────
-bool hubungkanWiFi() {
-  for (int percobaan = 1; percobaan <= WIFI_MAX_RETRY; percobaan++) {
-    Serial.printf("[WiFi] Percobaan %d/%d — SSID: %s\n", percobaan, WIFI_MAX_RETRY, WIFI_SSID);
-                  
-    tampilkanOled("Koneksi WiFi", "SSID: " + String(WIFI_SSID), "Percobaan: " + String(percobaan) + "/" + String(WIFI_MAX_RETRY), "Menghubungkan...");
-
-    WiFi.disconnect(true);
-    delay(100);
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASS);
-
-    unsigned long t0 = millis();
-    while (WiFi.status() != WL_CONNECTED) {
-      if (millis() - t0 > WIFI_TIMEOUT_MS) break;
-      delay(200);
-      Serial.print(".");
-    }
-    Serial.println();
-
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("[WiFi] ✓ Terhubung! IP: " + WiFi.localIP().toString());
-      tampilkanOled("WiFi Terhubung!", "IP:", WiFi.localIP().toString(), "RSSI: " + String(WiFi.RSSI()) + " dBm");
-      delay(2000);
-      return true;
-    }
-
-    tampilkanOled("WiFi Gagal!", "Status: " + String(WiFi.status()), "Mencoba lagi...", "");
-    delay(2000);
-  }
-  
-  tampilkanOled("WiFi Gagal", "Cek Hotspot/Router", "Modul Standby...", "");
-  return false;
-}
-
-// ── HTTP ke Supabase ─────────────────────────────────────────────────────────
-void kirimKeSupabase(float suhu, float kelembapan, float cahaya, bool gelap) {
-  if (WiFi.status() != WL_CONNECTED) {
-    tampilkanOled("WiFi Putus!", "Mencoba reconnect...", "", "");
-    if (!hubungkanWiFi()) {
-      tampilkanOled("Kirim Gagal", "WiFi tidak ada", "Data dibuang", "");
-      delay(2000);
-      return;
-    }
-  }
-
-  tampilkanOled("Supabase...", "Mengirim Data AVG", "Suhu: " + String(suhu, 1) + "C", "Mohon tunggu...");
+  updateStatusDB("Mengirim Data HTTP POST...", ILI9341_YELLOW);
 
   JsonDocument doc;
   doc["suhu"]       = round(suhu * 10.0) / 10.0;
@@ -147,97 +179,262 @@ void kirimKeSupabase(float suhu, float kelembapan, float cahaya, bool gelap) {
   http.addHeader("apikey", SUPABASE_KEY);
   http.addHeader("Authorization", "Bearer " + String(SUPABASE_KEY));
   http.addHeader("Prefer", "return=minimal");
-  http.setTimeout(10000);
-
+  
   int code = http.POST(payload);
-
   if (code == 201) {
-    tampilkanOled("Sukses Kirim!", "Kode HTTP: 201", "Database Updated", "");
+    updateStatusDB("Sukses HTTP 201 (DB Updated!)", ILI9341_GREEN);
   } else {
-    tampilkanOled("Gagal Kirim!", "Kode HTTP: " + String(code), "Cek Auth/URL", "");
+    updateStatusDB("Gagal HTTP " + String(code), ILI9341_RED);
   }
-
   http.end();
-  delay(2500); 
 }
 
-// ── Baca & Akumulasi ─────────────────────────────────────────────────────────
-void bacaDanAkumulasi() {
-  float suhu       = dht.readTemperature();
-  float kelembapan = dht.readHumidity();
-  int   cahaya     = analogRead(PIN_LDR_AO);
-
-  if (isnan(suhu) || isnan(kelembapan)) {
-    Serial.println("[DHT] Gagal baca sensor!");
-    tampilkanOled("ERROR SENSOR", "Gagal baca DHT11", "Cek Kabel PIN " + String(PIN_DHT), "");
-    return;
-  }
-
-  String kondisiCahaya = (cahaya > THRESHOLD_GELAP) ? "GELAP" : "TERANG";
-
-  if (hitungan % 10 == 0) {
-    Serial.printf("[SENSOR] Suhu: %.1f°C | Kelembapan: %.1f%% | Cahaya: %d | %s\n",
-      suhu, kelembapan, cahaya, kondisiCahaya.c_str());
-  }
-
-  int sisaWaktu = TICKS_PER_SEND - hitungan;
-  tampilkanOled(
-    "S: " + String(suhu, 1) + "C | H: " + String(kelembapan, 1) + "%",
-    "LDR: " + String(cahaya) + " (" + kondisiCahaya + ")",
-    "Akumulasi: " + String(hitungan) + "/" + String(TICKS_PER_SEND),
-    "Kirim dlm: " + String(sisaWaktu) + " dtk"
-  );
-
-  totalSuhu       += suhu;
-  totalKelembapan += kelembapan;
-  totalCahaya     += cahaya;
-  hitungan++;
-
-  if (hitungan >= TICKS_PER_SEND) {
-    float avgSuhu       = totalSuhu       / TICKS_PER_SEND;
-    float avgKelembapan = totalKelembapan / TICKS_PER_SEND;
-    float avgCahaya     = totalCahaya     / TICKS_PER_SEND;
-    bool  avgGelap      = (avgCahaya > THRESHOLD_GELAP);
-
-    kirimKeSupabase(avgSuhu, avgKelembapan, avgCahaya, avgGelap);
-    
-    // INI SOLUSI ERROR 2: Menambahkan parameter ke dalam tampilkanOled
-    tampilkanOled("Data Terkirim!", "Suhu AVG: " + String(avgSuhu, 1), "LDR AVG: " + String(avgCahaya, 0), "Status: " + String(avgGelap ? "GELAP" : "TERANG"));
-    delay(2000);
-
-    hitungan        = 0;
-    totalSuhu       = 0;
-    totalKelembapan = 0;
-    totalCahaya     = 0;
-  }
-}
-
-// ── Setup ────────────────────────────────────────────────────────────────────
+// ==========================================
+// SETUP UTAMA
+// ==========================================
 void setup() {
+
   Serial.begin(115200);
-  delay(500);
-  dht.begin();
-
-  Wire.begin(21, 22);
   
-  if (!oled.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("OLED tidak ditemukan!");
-    while (true); 
-  }
+  // 1. Nyalakan Layar Dulu
+  tft.begin();
+  tft.setRotation(1); 
+  tft.fillScreen(ILI9341_BLACK);
   
-  tampilkanOled("AtmoMind System", "Booting...", "Polines", "");
-  delay(2000);
+  delay(1000);
+  
+  // 2. Nyalakan Sensor
+  ts.begin();
+  dht.begin(); 
+  
+  delay(1000);
+  
+  // 3. Terakhir, nyalakan WiFi
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
 
-  Serial.println("\n[BOOT] Memulai...");
-  scanWiFi();
-  hubungkanWiFi();
 }
 
-// ── Loop ─────────────────────────────────────────────────────────────────────
+// ==========================================
+// LOOP UTAMA
+// ==========================================
 void loop() {
-  unsigned long now = millis();
-  if (now - lastTick >= TICK_INTERVAL_MS) {
-    lastTick = now;
-    bacaDanAkumulasi();
+  
+  // --- 1. DETEKSI SENTUHAN ---
+  static bool memoriSentuhan = false;     
+  static unsigned long waktuSentuhTerakhir = 0;
+  static unsigned long waktuMasukMode2 = 0; // [FIX] Timer auto-kembali Mode 2 → Mode 1
+
+  // [FIX] Validasi sentuhan: cek koordinat & tekanan untuk mencegah ghost touch dari noise SPI.
+  // ts.touched() saja tidak cukup karena traffic SPI ke TFT bisa terbaca sebagai sentuhan palsu.
+  // Sentuhan asli selalu menghasilkan koordinat dalam rentang wajar (100–3900) dan tekanan > 300.
+  bool sedangDisentuh = false;
+  if (ts.touched()) {
+    TS_Point p = ts.getPoint();
+    if (p.z > 300 && p.x > 100 && p.x < 3900 && p.y > 100 && p.y < 3900) {
+      sedangDisentuh = true;
+    }
+  }
+
+  if (sedangDisentuh && !memoriSentuhan && (millis() - waktuSentuhTerakhir > 300)) {
+    modeUtama = !modeUtama;
+    modeBerubah = true;
+    paksaUpdateAngka = true;
+    waktuSentuhTerakhir = millis();
+    if (!modeUtama) {
+      waktuMasukMode2 = millis(); // [FIX] Catat waktu saat pertama kali masuk Mode 2
+    }
+  }
+  memoriSentuhan = sedangDisentuh;
+
+  // [FIX] Auto kembali ke Mode 1 setelah 10 detik berada di Mode 2
+  if (!modeUtama && (millis() - waktuMasukMode2 >= DURASI_MODE2_MS)) {
+    modeUtama = true;
+    modeBerubah = true;
+    paksaUpdateAngka = true;
+  }
+
+  // --- 2. KERANGKA TAMPILAN (SKELETON UI) ---
+  if (modeBerubah) {
+    suhuLama = -999.0;
+    kelemLama = -999.0;
+
+    if (modeUtama) {
+      // ==== MODE 1: TYPOGRAPHY UI ====
+      tft.fillRect(0, 0, 320, 120, warnaSuhu);
+      tft.setCursor(10, 10); 
+      tft.setTextColor(ILI9341_BLACK); tft.setTextSize(4);
+      tft.print("T");
+      
+      tft.setCursor(285, 15); 
+      tft.setTextColor(ILI9341_WHITE); tft.setTextSize(3);
+      tft.print("C");
+      tft.drawCircle(276, 18, 4, ILI9341_WHITE); 
+      tft.drawCircle(276, 18, 3, ILI9341_WHITE);
+      tft.fillRect(0, 120, 320, 120, warnaKelem);
+      tft.setCursor(10, 130); 
+      tft.setTextColor(ILI9341_BLACK); tft.setTextSize(4);
+      tft.print("H");
+      
+      tft.setCursor(285, 135); 
+      tft.setTextColor(ILI9341_WHITE); tft.setTextSize(3);
+      tft.print("%");
+
+      tft.fillRect(0, 117, 320, 4, ILI9341_BLACK);
+    } else {
+      // ==== MODE 2: DEV DASHBOARD ====
+      tft.fillScreen(ILI9341_BLACK);
+      uint16_t warnaCyan = tft.color565(0, 180, 255); 
+      uint16_t warnaBiru = tft.color565(30, 144, 255);
+      uint16_t warnaDB   = tft.color565(255, 193, 7);
+      // --- BARIS 1: Sensor Suhu & Kelembapan ---
+      tft.drawBitmap(10, 8, thermo_bmp, 32, 30, warnaCyan);
+      tft.setCursor(50, 30); tft.setTextColor(ILI9341_WHITE); tft.setTextSize(1);
+      tft.print("Temperature");
+      
+      tft.drawBitmap(170, 10, drop_bmp, 24, 24, warnaBiru);
+      tft.drawFastHLine(0, 45, 320, ILI9341_DARKGREY);
+      // --- BARIS 2: Network / WiFi ---
+      tft.drawBitmap(15, 50, image_Wifi_icon_bits, 32, 32, ILI9341_WHITE);
+      tft.setCursor(55, 55); tft.setTextColor(ILI9341_LIGHTGREY); tft.setTextSize(1);
+      tft.print("Network Status:");
+      
+      tft.setCursor(55, 68); tft.setTextColor(warnaTeksWifi);
+      tft.print(teksWifi);
+      tft.drawFastHLine(0, 86, 320, ILI9341_DARKGREY);
+
+      // --- BARIS 3: Database / Files ---
+      tft.drawBitmap(15, 91, image_Files_icon_bits, 32, 32, warnaDB);
+      tft.setCursor(55, 96); tft.setTextColor(ILI9341_LIGHTGREY); tft.setTextSize(1);
+      tft.print("Supabase DB Status:");
+      
+      tft.setCursor(55, 109); tft.setTextColor(warnaTeksDB);
+      tft.print(teksDB);
+      tft.drawFastHLine(0, 127, 320, ILI9341_DARKGREY);
+      
+      // --- BARIS 4: LDR & Akumulasi ---
+      tft.setCursor(15, 133);
+      tft.setTextColor(ILI9341_LIGHTGREY); tft.setTextSize(1);
+      tft.print("Sensor LDR & Auto-Submit Status:");
+      
+      tft.setCursor(15, 145); tft.setTextColor(warnaTeksLDR);
+      tft.print(teksLDR);
+      tft.drawFastHLine(0, 168, 320, ILI9341_DARKGREY);
+    }
+    modeBerubah = false;
+  }
+
+  // --- 3. LOGIKA INTERVAL (Setiap 2 Detik ATAU saat Layar Disentuh) ---
+  bool saatnyaTick = (millis() - lastTick >= TICK_INTERVAL_MS);
+
+  if (saatnyaTick || paksaUpdateAngka) {
+    
+    // 3A. PENANGANAN WIFI (Jalan terus di background)
+    static unsigned long waktuReconnect = millis();
+    int statusWifiSekarang = WiFi.status();
+    
+    if (statusWifiSekarang != statusWifiLama) {
+      if (statusWifiSekarang == WL_CONNECTED) {
+        updateStatusWifi("Connected", ILI9341_GREEN);
+        if(teksDB.startsWith("Menunggu") || teksDB.startsWith("Gagal")) {
+           updateStatusDB("Siap Melakukan Transmisi Data...", ILI9341_CYAN);
+        }
+      } else {
+        WiFi.disconnect();
+        waktuReconnect = millis(); 
+        updateStatusDB("Akses Database Tertunda (No WiFi)", ILI9341_ORANGE);
+      }
+      statusWifiLama = statusWifiSekarang;
+    }
+    
+    if (statusWifiSekarang != WL_CONNECTED) {
+      unsigned long waktuBerlalu = millis() - waktuReconnect;
+      if (waktuBerlalu < 30000) { 
+        int sisaDetik = (30000 - waktuBerlalu) / 1000;
+        updateStatusWifi("Terputus! Reconnect dlm: " + String(sisaDetik) + "s", ILI9341_RED);
+      } else {
+        updateStatusWifi("Mencoba Reconnect...", ILI9341_YELLOW);
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(ssid, password);
+        waktuReconnect = millis(); 
+      }
+    }
+
+    // Variabel statis agar menyimpan hasil pembacaan walau ganti mode UI
+    static float nilaiSuhu = 0.0;
+    static float nilaiKelem = 0.0;
+    static int cahaya = 0;
+
+    // 3B. BACA SENSOR
+    if (saatnyaTick) {
+      lastTick = millis(); // Reset interval di sini
+
+      float bacaSuhu = dht.readTemperature(); 
+      float bacaKelem = dht.readHumidity();
+      cahaya = analogRead(PIN_LDR_AO);
+      
+      if (!isnan(bacaSuhu) && !isnan(bacaKelem)) {
+          nilaiSuhu = bacaSuhu;
+          nilaiKelem = bacaKelem;
+      } else {
+          updateStatusLDR("ERROR: Sensor DHT11 (Cek Kabel!)", ILI9341_RED);
+      }
+
+      // 3E. AKUMULASI & SUPABASE TRIGGER
+      totalSuhu       += nilaiSuhu;
+      totalKelembapan += nilaiKelem;
+      totalCahaya     += cahaya;
+      hitungan++;
+
+      if (hitungan >= TICKS_PER_SEND) {
+        float avgSuhu       = totalSuhu       / TICKS_PER_SEND;
+        float avgKelembapan = totalKelembapan / TICKS_PER_SEND;
+        float avgCahaya     = totalCahaya     / TICKS_PER_SEND;
+        bool  avgGelap      = (avgCahaya > THRESHOLD_GELAP);
+
+        kirimKeSupabase(avgSuhu, avgKelembapan, avgCahaya, avgGelap);
+        hitungan        = 0;
+        totalSuhu       = 0;
+        totalKelembapan = 0;
+        totalCahaya     = 0;
+      }
+    }
+
+    paksaUpdateAngka = false; // Matikan toggle paksa agar tidak bentrok
+
+    // 3C. UPDATE STATUS LDR INLINE
+    String kondisiCahaya = (cahaya > THRESHOLD_GELAP) ? "GELAP" : "TERANG";
+    String ldrString = "Val: " + String(cahaya) + " (" + kondisiCahaya + ") | Load: " + String(hitungan) + "/" + String(TICKS_PER_SEND) + "s";
+    updateStatusLDR(ldrString, ILI9341_CYAN);
+
+    // 3D. UPDATE ANGKA SUHU / KELEMBAPAN DI LAYAR
+    if (modeUtama) {
+      if (nilaiSuhu != suhuLama) {
+        tft.fillRect(60, 30, 200, 60, warnaSuhu);
+        tft.setCursor(75, 32); tft.setTextColor(ILI9341_WHITE); tft.setTextSize(7); 
+        tft.print(nilaiSuhu, 1);
+        suhuLama = nilaiSuhu;
+      }
+      if (nilaiKelem != kelemLama) {
+        tft.fillRect(60, 150, 200, 60, warnaKelem);
+        tft.setCursor(75, 152); tft.setTextColor(ILI9341_WHITE); tft.setTextSize(7); 
+        tft.print(nilaiKelem, 1);
+        kelemLama = nilaiKelem;
+      }
+    } else {
+      if (nilaiSuhu != suhuLama) {
+        tft.fillRect(45, 12, 110, 16, ILI9341_BLACK);
+        tft.setCursor(55, 12); tft.setTextColor(ILI9341_WHITE); tft.setTextSize(2); 
+        tft.print(nilaiSuhu, 1); tft.print(" C"); 
+        tft.drawCircle(117, 14, 2, ILI9341_WHITE); 
+        suhuLama = nilaiSuhu;
+      }
+      if (nilaiKelem != kelemLama) {
+        tft.fillRect(205, 12, 110, 16, ILI9341_BLACK);
+        tft.setCursor(205, 12); tft.setTextColor(ILI9341_WHITE); tft.setTextSize(2); 
+        tft.print(nilaiKelem, 1); tft.print(" %");
+        kelemLama = nilaiKelem;
+      }
+    }
   }
 }
