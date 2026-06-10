@@ -219,6 +219,7 @@ void setup() {
 // LOOP UTAMA
 // ==========================================
 void loop() {
+<<<<<<< HEAD
   
   // --- 1. DETEKSI SENTUHAN ---
   static bool memoriSentuhan = false;     
@@ -234,6 +235,16 @@ void loop() {
     if (p.z > 300 && p.x > 100 && p.x < 3900 && p.y > 100 && p.y < 3900) {
       sedangDisentuh = true;
     }
+=======
+  if (!WiFi.status() == WL_CONNECTED) {
+    hubungkanWiFi();
+  }
+
+  unsigned long now = millis();
+  if (now - lastTick >= TICK_INTERVAL_MS) {
+    lastTick = now;
+    bacaDanAkumulasi();
+>>>>>>> 5c8cb05f88e1edba76fb66347cf1367aa1c83ee4
   }
 
   if (sedangDisentuh && !memoriSentuhan && (millis() - waktuSentuhTerakhir > 300)) {
