@@ -8,7 +8,7 @@
 #include <WiFi.h> 
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-
+#include <time.h>
 
 // ==========================================
 // KONFIGURASI PIN TERBAIK (TFT KANAN, SENSOR KIRI)
@@ -19,14 +19,13 @@
 #define TFT_DC    21
 #define TFT_RST   22
 #define TOUCH_CS  15
-// Catatan: MISO=19, MOSI=23, SCK=18 otomatis di deretan 3V3
 
 // --- PIN SENSOR DHT11 (Blok Kiri / Deretan VIN) ---
 #define DHTPIN    27     
 #define DHTTYPE   DHT11  
 
 // --- PIN SENSOR LDR (Blok Kiri / Deretan VIN) ---
-#define PIN_LDR_AO       34  // Tetap di D34 (Analog)
+#define PIN_LDR_AO       34  // Analog ADC
 #define THRESHOLD_GELAP   2400
 
 // ==========================================
@@ -34,14 +33,25 @@
 // ==========================================
 #define TICK_INTERVAL_MS  2000UL 
 #define TICKS_PER_SEND    150    
-#define DURASI_MODE2_MS   10000UL  // Auto-kembali ke Mode 1 setelah 10 detik
+#define DURASI_MODE2_MS   10000UL // Auto-kembali ke Mode 1 setelah 10 detik
 
 #ifndef SUPABASE_TABLE
 #define SUPABASE_TABLE "sensor_data"
 #endif
 
-const char* ssid = "POCO M5";
-const char* password = "miko1234";
+// Menggunakan Macro dari secrets.h (WIFI_SSID & WIFI_PASS)
+#ifndef WIFI_SSID
+#define WIFI_SSID "Mawar1"
+#define WIFI_PASS "mawar119"
+#endif
+
+const char* ssid     = WIFI_SSID;
+const char* password = WIFI_PASS;
+
+// Konfigurasi NTP Time (GMT+7 / WIB)
+const char* ntpServer = "pool.ntp.org";
+const long gmtOffset_sec = 7 * 3600;
+const int daylightOffset_sec = 0;
 
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 XPT2046_Touchscreen ts(TOUCH_CS);
@@ -66,14 +76,13 @@ float totalSuhu       = 0;
 float totalKelembapan = 0;
 float totalCahaya     = 0;
 
-// --- VARIABEL MEMORI STATUS (Agar tidak hilang saat ganti mode UI) ---
+// --- VARIABEL MEMORI STATUS ---
 String teksWifi       = "Menghubungkan WiFi...";
 uint16_t warnaTeksWifi= ILI9341_YELLOW;
 String teksDB         = "Menunggu Jaringan...";
 uint16_t warnaTeksDB  = ILI9341_ORANGE;
 String teksLDR        = "LDR: - | Sisa Waktu: -";
 uint16_t warnaTeksLDR = ILI9341_WHITE;
-
 
 // ==========================================
 // DATA BITMAP / HEX ARRAY 
@@ -163,11 +172,21 @@ void kirimKeSupabase(float suhu, float kelembapan, float cahaya, bool gelap) {
 
   updateStatusDB("Mengirim Data HTTP POST...", ILI9341_YELLOW);
 
+  struct tm timeinfo;
+  char timeBuffer[35] = "";
+  if (getLocalTime(&timeinfo)) {
+    strftime(timeBuffer, sizeof(timeBuffer), "%Y-%m-%dT%H:%M:%S+07:00", &timeinfo);
+  }
+
   JsonDocument doc;
   doc["suhu"]       = round(suhu * 10.0) / 10.0;
   doc["kelembapan"] = round(kelembapan * 10.0) / 10.0;
   doc["cahaya"]     = round(cahaya);
   doc["kondisi"]    = gelap ? "GELAP" : "TERANG";
+  
+  if (strlen(timeBuffer) > 0) {
+    doc["created_at"] = timeBuffer;
+  }
 
   String payload;
   serializeJson(doc, payload);
@@ -195,20 +214,22 @@ void kirimKeSupabase(float suhu, float kelembapan, float cahaya, bool gelap) {
 void setup() {
   Serial.begin(115200);
   
-  // 1. Nyalakan Layar Dulu
+  // 1. Nyalakan Layar
   tft.begin();
   tft.setRotation(1); 
   tft.fillScreen(ILI9341_BLACK);
-  delay(1000);
+  delay(500);
   
   // 2. Nyalakan Sensor
   ts.begin();
   dht.begin(); 
-  delay(1000);
+  delay(500);
   
-  // 3. Terakhir, nyalakan WiFi
+  // 3. Konfigurasi WiFi & NTP Time
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
   WiFi.begin(ssid, password);
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
 }
 
 // ==========================================
@@ -240,7 +261,7 @@ void loop() {
   }
   memoriSentuhan = sedangDisentuh;
 
-  // Auto kembali ke Mode 1 setelah 10 detik berada di Mode 2
+  // Auto kembali ke Mode 1 setelah 10 detik
   if (!modeUtama && (millis() - waktuMasukMode2 >= DURASI_MODE2_MS)) {
     modeUtama = true;
     modeBerubah = true;
@@ -280,14 +301,16 @@ void loop() {
       uint16_t warnaCyan = tft.color565(0, 180, 255); 
       uint16_t warnaBiru = tft.color565(30, 144, 255);
       uint16_t warnaDB   = tft.color565(255, 193, 7);
-      // --- BARIS 1: Sensor Suhu & Kelembapan ---
+      
+      // BARIS 1: Sensor Suhu & Kelembapan
       tft.drawBitmap(10, 8, thermo_bmp, 32, 30, warnaCyan);
       tft.setCursor(50, 30); tft.setTextColor(ILI9341_WHITE); tft.setTextSize(1);
       tft.print("Temperature");
       
       tft.drawBitmap(170, 10, drop_bmp, 24, 24, warnaBiru);
       tft.drawFastHLine(0, 45, 320, ILI9341_DARKGREY);
-      // --- BARIS 2: Network / WiFi ---
+
+      // BARIS 2: Network / WiFi
       tft.drawBitmap(15, 50, image_Wifi_icon_bits, 32, 32, ILI9341_WHITE);
       tft.setCursor(55, 55); tft.setTextColor(ILI9341_LIGHTGREY); tft.setTextSize(1);
       tft.print("Network Status:");
@@ -296,7 +319,7 @@ void loop() {
       tft.print(teksWifi);
       tft.drawFastHLine(0, 86, 320, ILI9341_DARKGREY);
 
-      // --- BARIS 3: Database / Files ---
+      // BARIS 3: Database / Files
       tft.drawBitmap(15, 91, image_Files_icon_bits, 32, 32, warnaDB);
       tft.setCursor(55, 96); tft.setTextColor(ILI9341_LIGHTGREY); tft.setTextSize(1);
       tft.print("Supabase DB Status:");
@@ -305,7 +328,7 @@ void loop() {
       tft.print(teksDB);
       tft.drawFastHLine(0, 127, 320, ILI9341_DARKGREY);
       
-      // --- BARIS 4: LDR & Akumulasi ---
+      // BARIS 4: LDR & Akumulasi
       tft.setCursor(15, 133);
       tft.setTextColor(ILI9341_LIGHTGREY); tft.setTextSize(1);
       tft.print("Sensor LDR & Auto-Submit Status:");
@@ -317,43 +340,37 @@ void loop() {
     modeBerubah = false;
   }
 
-  // --- 3. LOGIKA INTERVAL (Setiap 2 Detik ATAU saat Layar Disentuh) ---
+  // --- 3. LOGIKA INTERVAL ---
   bool saatnyaTick = (millis() - lastTick >= TICK_INTERVAL_MS);
 
   if (saatnyaTick || paksaUpdateAngka) {
     
-    // 3A. PENANGANAN WIFI (Jalan terus di background)
-    static unsigned long waktuReconnect = millis();
+    // 3A. PENANGANAN WIFI (Non-blocking State Machine)
+    static unsigned long lastConnectAttempt = 0;
     int statusWifiSekarang = WiFi.status();
     
-    if (statusWifiSekarang != statusWifiLama) {
-      if (statusWifiSekarang == WL_CONNECTED) {
+    if (statusWifiSekarang == WL_CONNECTED) {
+      if (statusWifiLama != WL_CONNECTED) {
         updateStatusWifi("Connected", ILI9341_GREEN);
-        if(teksDB.startsWith("Menunggu") || teksDB.startsWith("Gagal")) {
+        if (teksDB.startsWith("Menunggu") || teksDB.startsWith("Gagal")) {
            updateStatusDB("Siap Melakukan Transmisi Data...", ILI9341_CYAN);
         }
-      } else {
-        WiFi.disconnect();
-        waktuReconnect = millis(); 
-        updateStatusDB("Akses Database Tertunda (No WiFi)", ILI9341_ORANGE);
+        statusWifiLama = WL_CONNECTED;
       }
-      statusWifiLama = statusWifiSekarang;
-    }
-    
-    if (statusWifiSekarang != WL_CONNECTED) {
-      unsigned long waktuBerlalu = millis() - waktuReconnect;
-      if (waktuBerlalu < 30000) { 
-        int sisaDetik = (30000 - waktuBerlalu) / 1000;
-        updateStatusWifi("Terputus! Reconnect dlm: " + String(sisaDetik) + "s", ILI9341_RED);
-      } else {
-        updateStatusWifi("Mencoba Reconnect...", ILI9341_YELLOW);
-        WiFi.mode(WIFI_STA);
+    } else {
+      if (statusWifiLama == WL_CONNECTED || statusWifiLama == -1) {
+        updateStatusWifi("Menghubungkan...", ILI9341_YELLOW);
+        updateStatusDB("Akses Database Tertunda (No WiFi)", ILI9341_ORANGE);
+        statusWifiLama = statusWifiSekarang;
+      }
+
+      // Retry koneksi setiap 10 detik tanpa memblokir execution loop
+      if (millis() - lastConnectAttempt >= 10000) {
+        lastConnectAttempt = millis();
         WiFi.begin(ssid, password);
-        waktuReconnect = millis(); 
       }
     }
 
-    // Variabel statis agar menyimpan hasil pembacaan walau ganti mode UI
     static float nilaiSuhu = 0.0;
     static float nilaiKelem = 0.0;
     static int cahaya = 0;
@@ -383,7 +400,7 @@ void loop() {
         float avgSuhu       = totalSuhu       / TICKS_PER_SEND;
         float avgKelembapan = totalKelembapan / TICKS_PER_SEND;
         float avgCahaya     = totalCahaya     / TICKS_PER_SEND;
-        bool  avgGelap      = (avgCahaya > THRESHOLD_GELAP);
+        bool avgGelap       = (avgCahaya < THRESHOLD_GELAP);
 
         kirimKeSupabase(avgSuhu, avgKelembapan, avgCahaya, avgGelap);
         hitungan        = 0;
@@ -396,7 +413,7 @@ void loop() {
     paksaUpdateAngka = false;
 
     // 3C. UPDATE STATUS LDR INLINE
-    String kondisiCahaya = (cahaya > THRESHOLD_GELAP) ? "GELAP" : "TERANG";
+    String kondisiCahaya = (cahaya < THRESHOLD_GELAP) ? "GELAP" : "TERANG";
     String ldrString = "Val: " + String(cahaya) + " (" + kondisiCahaya + ") | Load: " + String(hitungan) + "/" + String(TICKS_PER_SEND) + "s";
     updateStatusLDR(ldrString, ILI9341_CYAN);
 
