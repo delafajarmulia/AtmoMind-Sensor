@@ -41,8 +41,8 @@
 
 // Menggunakan Macro dari secrets.h (WIFI_SSID & WIFI_PASS)
 #ifndef WIFI_SSID
-#define WIFI_SSID "Mawar1"
-#define WIFI_PASS "mawar119"
+#define WIFI_SSID "Wifi-SB-I-R.DOSEN"
+#define WIFI_PASS ""
 #endif
 
 const char* ssid     = WIFI_SSID;
